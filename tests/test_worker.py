@@ -372,7 +372,7 @@ class TestWorker(RQTestCase):
         self.assertEqual(worker.failed_job_count, 2)
         self.assertEqual(worker.successful_job_count, 2)
         self.assertEqual(worker.total_working_time, 3.0)
-    
+
     def test_handle_retry(self):
         """handle_job_failure() handles retry properly"""
         connection = self.testconn
@@ -408,7 +408,7 @@ class TestWorker(RQTestCase):
         self.assertEqual([], queue.job_ids)
         # If a job is no longer retries, it's put in FailedJobRegistry
         self.assertTrue(job in registry)
-    
+
     def test_retry_interval(self):
         """Retries with intervals are scheduled"""
         connection = self.testconn
@@ -1192,7 +1192,11 @@ class TestWorkerSubprocess(RQTestCase):
     def setUp(self):
         super(TestWorkerSubprocess, self).setUp()
         db_num = self.testconn.connection_pool.connection_kwargs['db']
-        self.redis_url = 'redis://127.0.0.1:6379/%d' % db_num
+        self.redis_url = 'redis://%s:%d/%d' % (
+            self.testconn.connection_pool.connection_kwargs["host"],
+            self.testconn.connection_pool.connection_kwargs["port"],
+            db_num
+        )
 
     def test_run_empty_queue(self):
         """Run the worker in its own process with an empty queue"""
