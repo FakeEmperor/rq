@@ -371,3 +371,61 @@ If you want to disable RQ's default exception handler, use the `--disable-defaul
 ```console
 $ rq worker --exception-handler 'path.to.my.ErrorHandler' --disable-default-exception-handler
 ```
+
+
+## Sending Commands to Worker
+_New in version 1.6.0._
+
+Starting in version 1.6.0, workers use Redis' pubsub mechanism to listen to external commands while
+they're working. Two commands are currently implemented:
+
+### Shutting Down a Worker
+
+`send_shutdown_command()` instructs a worker to shutdown. This is similar to sending a SIGINT
+signal to a worker.
+
+```python
+from redis import Redis
+from rq.command import send_shutdown_command
+from rq.worker import Worker
+
+redis = Redis()
+
+workers = Worker.all(redis)
+for worker in workers:
+   send_shutdown_command(redis, worker.name)  # Tells worker to shutdown
+```
+
+### Killing a Horse
+
+`send_kill_horse_command()` tells a worker to cancel a currently executing job. If worker is
+not currently working, this command will be ignored.
+
+```python
+from redis import Redis
+from rq.command import send_kill_horse_command
+from rq.worker import Worker, WorkerStatus
+
+redis = Redis()
+
+workers = Worker.all(redis)
+for worker in workers:
+   if worker.state == WorkerStatus.BUSY:
+      send_kill_horse_command(redis, worker.name)
+```
+
+
+### Stopping a Job
+_New in version 1.7.0._
+
+You can use `send_stop_job_command()` to tell a worker to immediately stop a currently executing job. A job that's stopped will be sent to [FailedJobRegistry](https://python-rq.org/docs/results/#dealing-with-exceptions).
+
+```python
+from redis import Redis
+from rq.command import send_stop_job_command
+
+redis = Redis()
+
+# This will raise an exception if job is invalid or not currently executing
+send_stop_job_command(redis, job_id)
+```

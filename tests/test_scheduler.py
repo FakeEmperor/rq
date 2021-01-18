@@ -1,11 +1,10 @@
 import os
-import time
-
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from multiprocessing import Process
 
+import mock
 from rq import Queue
-from rq.compat import utc, PY2
+from rq.compat import PY2
 from rq.exceptions import NoSuchJobError
 from rq.job import Job, Retry
 from rq.registry import FinishedJobRegistry, ScheduledJobRegistry
@@ -13,10 +12,9 @@ from rq.scheduler import RQScheduler
 from rq.utils import current_timestamp
 from rq.worker import Worker
 
-from .fixtures import kill_worker, say_hello
-from tests import RQTestCase
+from tests import RQTestCase, find_empty_redis_database, ssl_test
 
-import mock
+from .fixtures import kill_worker, say_hello
 
 
 class TestScheduledJobRegistry(RQTestCase):
@@ -35,6 +33,21 @@ class TestScheduledJobRegistry(RQTestCase):
         self.assertEqual(registry.get_jobs_to_enqueue(timestamp + 20),
                          ['foo', 'bar'])
 
+    def test_get_jobs_to_schedule_with_chunk_size(self):
+        """Max amount of jobs returns by get_jobs_to_schedule() equal to chunk_size"""
+        queue = Queue(connection=self.testconn)
+        registry = ScheduledJobRegistry(queue=queue)
+        timestamp = current_timestamp()
+        chunk_size = 5
+
+        for index in range(0, chunk_size * 2):
+            self.testconn.zadd(registry.key, {'foo_{}'.format(index): 1})
+
+        self.assertEqual(len(registry.get_jobs_to_schedule(timestamp, chunk_size)),
+                         chunk_size)
+        self.assertEqual(len(registry.get_jobs_to_schedule(timestamp, chunk_size * 2)),
+                         chunk_size * 2)
+
     def test_get_scheduled_time(self):
         """get_scheduled_time() returns job's scheduled datetime"""
         queue = Queue(connection=self.testconn)
@@ -42,8 +55,8 @@ class TestScheduledJobRegistry(RQTestCase):
 
         job = Job.create('myfunc', connection=self.testconn)
         job.save()
-        dt = datetime(2019, 1, 1, tzinfo=utc)
-        registry.schedule(job, datetime(2019, 1, 1, tzinfo=utc))
+        dt = datetime(2019, 1, 1, tzinfo=timezone.utc)
+        registry.schedule(job, datetime(2019, 1, 1, tzinfo=timezone.utc))
         self.assertEqual(registry.get_scheduled_time(job), dt)
         # get_scheduled_time() should also work with job ID
         self.assertEqual(registry.get_scheduled_time(job.id), dt)
@@ -59,34 +72,29 @@ class TestScheduledJobRegistry(RQTestCase):
         job.save()
         registry = ScheduledJobRegistry(queue=queue)
 
-        if PY2:
-            # On Python 2, datetime needs to have timezone
-            self.assertRaises(ValueError, registry.schedule, job, datetime(2019, 1, 1))
-            registry.schedule(job, datetime(2019, 1, 1, tzinfo=utc))
+        from datetime import timezone
+
+        # If we pass in a datetime with no timezone, `schedule()`
+        # assumes local timezone so depending on your local timezone,
+        # the timestamp maybe different
+        #
+        # we need to account for the difference between a timezone
+        # with DST active and without DST active.  The time.timezone
+        # property isn't accurate when time.daylight is non-zero,
+        # we'll test both.
+        #
+        # first, time.daylight == 0 (not in DST).
+        # mock the sitatuoin for American/New_York not in DST (UTC - 5)
+        # time.timezone = 18000
+        # time.daylight = 0
+        # time.altzone = 14400
+
+        mock_day = mock.patch('time.daylight', 0)
+        mock_tz = mock.patch('time.timezone', 18000)
+        mock_atz = mock.patch('time.altzone', 14400)
+        with mock_tz, mock_day, mock_atz:
+            registry.schedule(job, datetime(2019, 1, 1))
             self.assertEqual(self.testconn.zscore(registry.key, job.id),
-                             1546300800)  # 2019-01-01 UTC in Unix timestamp
-        else:
-            from datetime import timezone
-            # If we pass in a datetime with no timezone, `schedule()`
-            # assumes local timezone so depending on your local timezone,
-            # the timestamp maybe different
-
-            # we need to account for the difference between a timezone
-            # with DST active and without DST active.  The time.timezone
-            # property isn't accurate when time.daylight is non-zero,
-            # we'll test both.
-
-            # first, time.daylight == 0 (not in DST).
-            # mock the sitatuoin for American/New_York not in DST (UTC - 5)
-            # time.timezone = 18000
-            # time.daylight = 0
-            # time.altzone = 14400
-            mock_day = mock.patch('time.daylight', 0)
-            mock_tz = mock.patch('time.timezone', 18000)
-            mock_atz = mock.patch('time.altzone', 14400)
-            with mock_tz, mock_day, mock_atz:
-                registry.schedule(job, datetime(2019, 1, 1))
-                self.assertEqual(self.testconn.zscore(registry.key, job.id),
                                 1546300800 + 18000)  # 2019-01-01 UTC in Unix timestamp
 
             # second, time.daylight != 0 (in DST)
@@ -100,8 +108,7 @@ class TestScheduledJobRegistry(RQTestCase):
             with mock_tz, mock_day, mock_atz:
                 registry.schedule(job, datetime(2019, 1, 1))
                 self.assertEqual(self.testconn.zscore(registry.key, job.id),
-                                1546300800 + 14400)  # 2019-01-01 UTC in Unix timestamp
-
+                                 1546300800 + 14400)  # 2019-01-01 UTC in Unix timestamp
 
             # Score is always stored in UTC even if datetime is in a different tz
             tz = timezone(timedelta(hours=7))
@@ -213,7 +220,7 @@ class TestScheduler(RQTestCase):
         registry = ScheduledJobRegistry(queue=queue)
         job = Job.create('myfunc', connection=self.testconn)
         job.save()
-        registry.schedule(job, datetime(2019, 1, 1, tzinfo=utc))
+        registry.schedule(job, datetime(2019, 1, 1, tzinfo=timezone.utc))
         scheduler = RQScheduler([queue], connection=self.testconn)
         scheduler.acquire_locks()
         scheduler.enqueue_scheduled_jobs()
@@ -223,7 +230,7 @@ class TestScheduler(RQTestCase):
         self.assertEqual(len(registry), 0)
 
         # Jobs scheduled in the far future should not be affected
-        registry.schedule(job, datetime(2100, 1, 1, tzinfo=utc))
+        registry.schedule(job, datetime(2100, 1, 1, tzinfo=timezone.utc))
         scheduler.enqueue_scheduled_jobs()
         self.assertEqual(len(queue), 1)
 
@@ -254,6 +261,7 @@ class TestWorker(RQTestCase):
         worker = Worker(queues=[queue], connection=self.testconn)
         worker.work(burst=True, with_scheduler=True)
         self.assertIsNotNone(worker.scheduler)
+        self.assertIsNone(self.testconn.get(worker.scheduler.get_locking_key('default')))
 
     @mock.patch.object(RQScheduler, 'acquire_locks')
     def test_run_maintenance_tasks(self, mocked):
@@ -279,7 +287,22 @@ class TestWorker(RQTestCase):
         p = Process(target=kill_worker, args=(os.getpid(), False, 5))
 
         p.start()
-        queue.enqueue_at(datetime(2019, 1, 1, tzinfo=utc), say_hello)
+        queue.enqueue_at(datetime(2019, 1, 1, tzinfo=timezone.utc), say_hello)
+        worker.work(burst=False, with_scheduler=True)
+        p.join(1)
+        self.assertIsNotNone(worker.scheduler)
+        registry = FinishedJobRegistry(queue=queue)
+        self.assertEqual(len(registry), 1)
+
+    @ssl_test
+    def test_work_with_ssl(self):
+        connection = find_empty_redis_database(ssl=True)
+        queue = Queue(connection=connection)
+        worker = Worker(queues=[queue], connection=connection)
+        p = Process(target=kill_worker, args=(os.getpid(), False, 5))
+
+        p.start()
+        queue.enqueue_at(datetime(2019, 1, 1, tzinfo=timezone.utc), say_hello)
         worker.work(burst=False, with_scheduler=True)
         p.join(1)
         self.assertIsNotNone(worker.scheduler)
@@ -296,7 +319,7 @@ class TestQueue(RQTestCase):
         scheduler = RQScheduler([queue], connection=self.testconn)
         scheduler.acquire_locks()
         # Jobs created using enqueue_at is put in the ScheduledJobRegistry
-        job = queue.enqueue_at(datetime(2019, 1, 1, tzinfo=utc), say_hello)
+        job = queue.enqueue_at(datetime(2019, 1, 1, tzinfo=timezone.utc), say_hello)
         self.assertEqual(len(queue), 0)
         self.assertEqual(len(registry), 1)
 
@@ -315,7 +338,7 @@ class TestQueue(RQTestCase):
         registry = ScheduledJobRegistry(queue=queue)
 
         job = queue.enqueue_in(timedelta(seconds=30), say_hello)
-        now = datetime.now(utc)
+        now = datetime.now(timezone.utc)
         scheduled_time = registry.get_scheduled_time(job)
         # Ensure that job is scheduled roughly 30 seconds from now
         self.assertTrue(

@@ -1,8 +1,8 @@
 import calendar
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from .compat import as_text, utc
+from .compat import as_text
 from .connections import resolve_connection
 from .defaults import DEFAULT_FAILURE_TTL
 from .exceptions import InvalidJobOperation, NoSuchJobError
@@ -333,11 +333,11 @@ class ScheduledJobRegistry(StatusJobRegistry):
         score = timestamp if timestamp is not None else current_timestamp()
         return connection.zremrangebyscore(self.key, 0, score)
 
-    def get_jobs_to_schedule(self, timestamp=None):
+    def get_jobs_to_schedule(self, timestamp=None, chunk_size=1000):
         """Remove jobs whose timestamp is in the past from registry."""
         score = timestamp if timestamp is not None else current_timestamp()
         return [as_text(job_id) for job_id in
-                self.connection.zrangebyscore(self.key, 0, score)]
+                self.connection.zrangebyscore(self.key, 0, score, start=0, num=chunk_size)]
 
     def get_scheduled_time(self, job_or_id):
         """Returns datetime (UTC) at which job is scheduled to be enqueued"""
@@ -350,7 +350,7 @@ class ScheduledJobRegistry(StatusJobRegistry):
         if not score:
             raise NoSuchJobError
 
-        return datetime.fromtimestamp(score, tz=utc)
+        return datetime.fromtimestamp(score, tz=timezone.utc)
 
 
 def clean_registries(queue):

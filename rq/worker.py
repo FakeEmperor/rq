@@ -22,10 +22,11 @@ try:
 except ImportError:
     from signal import SIGTERM as SIGKILL
 
-from redis import WatchError
+import redis.exceptions
 
 from . import worker_registration
-from .compat import PY2, as_text, string_types, text_type
+from .command import parse_payload, PUBSUB_CHANNEL_TEMPLATE, handle_command
+from .compat import as_text, string_types, text_type
 from .connections import get_current_connection, push_connection, pop_connection
 
 from .defaults import (DEFAULT_RESULT_TTL,
@@ -105,6 +106,10 @@ class Worker(object):
     log_result_lifespan = True
     # `log_job_description` is used to toggle logging an entire jobs description.
     log_job_description = True
+    # factor to increase connection_wait_time incase of continous connection failures.
+    exponential_backoff_factor = 2.0
+    # Max Wait time (in seconds) after which exponential_backoff_factor wont be applicable.
+    max_connection_wait_time = 60.0
 
     @classmethod
     def all(cls, connection=None, job_class=None, queue_class=None, queue=None, serializer=None):
@@ -211,6 +216,8 @@ class Worker(object):
         self.total_working_time = 0
         self.birth_date = None
         self.scheduler = None
+        self.pubsub = None
+        self.pubsub_thread = None
 
         self.disable_default_exception_handler = disable_default_exception_handler
 
@@ -244,6 +251,11 @@ class Worker(object):
     def key(self):
         """Returns the worker's Redis hash key."""
         return self.redis_worker_namespace_prefix + self.name
+
+    @property
+    def pubsub_channel_name(self):
+        """Returns the worker's Redis hash key."""
+        return PUBSUB_CHANNEL_TEMPLATE % self.name
 
     @property
     def horse_pid(self):
@@ -379,13 +391,12 @@ class Worker(object):
         if job_id is None:
             return None
 
-        return self.job_class.fetch(job_id, self.connection)
+        return self.job_class.fetch(job_id, self.connection, self.serializer)
 
     def _install_signal_handlers(self):
         """Installs signal handlers for handling SIGINT and SIGTERM
         gracefully.
         """
-
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGTERM, self.request_stop)
 
@@ -394,7 +405,7 @@ class Worker(object):
         Kill the horse but catch "No such process" error has the horse could already be dead.
         """
         try:
-            os.kill(self.horse_pid, sig)
+            os.killpg(os.getpgid(self.horse_pid), sig)
             self.log.info('Killed horse pid %s', self.horse_pid)
         except OSError as e:
             if e.errno == errno.ESRCH:
@@ -438,9 +449,13 @@ class Worker(object):
         signal.signal(signal.SIGTERM, self.request_force_stop)
 
         self.handle_warm_shutdown_request()
+        self._shutdown()
 
-        # If shutdown is requested in the middle of a job, wait until
-        # finish before shutting down and save the request in redis
+    def _shutdown(self):
+        """
+        If shutdown is requested in the middle of a job, wait until
+        finish before shutting down and save the request in redis
+        """
         if self.get_state() == WorkerStatus.BUSY:
             self._stop_requested = True
             self.set_shutdown_requested_date()
@@ -458,7 +473,6 @@ class Worker(object):
 
     def check_for_suspension(self, burst):
         """Check to see if workers have been suspended by `rq suspend`"""
-
         before_state = None
         notified = False
 
@@ -493,6 +507,22 @@ class Worker(object):
                 self.scheduler.acquire_locks(auto_start=True)
         self.clean_registries()
 
+    def subscribe(self):
+        """Subscribe to this worker's channel"""
+        self.log.info('Subscribing to channel %s', self.pubsub_channel_name)
+        self.pubsub = self.connection.pubsub()
+        self.pubsub.subscribe(**{self.pubsub_channel_name: self.handle_payload})
+        self.pubsub_thread = self.pubsub.run_in_thread(sleep_time=0.2)
+
+    def unsubscribe(self):
+        """Unsubscribe from pubsub channel"""
+        if self.pubsub_thread:
+            self.log.info('Unsubscribing from channel %s', self.pubsub_channel_name)
+            self.pubsub_thread.stop()
+            self.pubsub_thread.join()
+            self.pubsub.unsubscribe()
+            self.pubsub.close()
+
     def work(self, burst=False, logging_level="INFO", date_format=DEFAULT_LOGGING_DATE_FORMAT,
              log_format=DEFAULT_LOGGING_FORMAT, max_jobs=None, with_scheduler=False):
         """Starts the work loop.
@@ -507,12 +537,15 @@ class Worker(object):
         completed_jobs = 0
         self.register_birth()
         self.log.info("Worker %s: started, version %s", self.key, VERSION)
+        self.subscribe()
         self.set_state(WorkerStatus.STARTED)
         qnames = self.queue_names()
         self.log.info('*** Listening on %s...', green(', '.join(qnames)))
 
         if with_scheduler:
-            self.scheduler = RQScheduler(self.queues, connection=self.connection)
+            self.scheduler = RQScheduler(
+                self.queues, connection=self.connection, logging_level=logging_level,
+                date_format=date_format, log_format=log_format)
             self.scheduler.acquire_locks()
             # If lock is acquired, start scheduler
             if self.scheduler.acquired_locks:
@@ -520,6 +553,7 @@ class Worker(object):
                 # before working. Otherwise, start scheduler in a separate process
                 if burst:
                     self.scheduler.enqueue_scheduled_jobs()
+                    self.scheduler.release_locks()
                 else:
                     self.scheduler.start()
 
@@ -538,7 +572,6 @@ class Worker(object):
                         break
 
                     timeout = None if burst else max(1, self.default_worker_ttl - 15)
-
                     result = self.dequeue_job_and_maintain_ttl(timeout)
                     if result is None:
                         if burst:
@@ -578,6 +611,7 @@ class Worker(object):
                     self.stop_scheduler()
 
                 self.register_death()
+                self.unsubscribe()
         return bool(completed_jobs)
 
     def stop_scheduler(self):
@@ -597,19 +631,22 @@ class Worker(object):
         self.set_state(WorkerStatus.IDLE)
         self.procline('Listening on ' + qnames)
         self.log.debug('*** Listening on %s...', green(qnames))
-
+        connection_wait_time = 1.0
         while True:
-            self.heartbeat()
-
-            if self.should_run_maintenance_tasks:
-                self.run_maintenance_tasks()
 
             try:
+                self.heartbeat()
+
+                if self.should_run_maintenance_tasks:
+                    self.run_maintenance_tasks()
+
                 queues = list(self.queues)
                 random.shuffle(queues)
-                result = self.queue_class.dequeue_any(queues, timeout,
+
+                result = self.queue_class.dequeue_any(self.queues, timeout,
                                                       connection=self.connection,
-                                                      job_class=self.job_class)
+                                                      job_class=self.job_class,
+                                                      serializer=self.serializer)
                 if result is not None:
 
                     job, queue = result
@@ -624,6 +661,14 @@ class Worker(object):
                 break
             except DequeueTimeout:
                 pass
+            except redis.exceptions.ConnectionError as conn_err:
+                self.log.error('Could not connect to Redis instance: %s Retrying in %d seconds...',
+                                conn_err, connection_wait_time)
+                time.sleep(connection_wait_time)
+                connection_wait_time *= self.exponential_backoff_factor
+                connection_wait_time = min(connection_wait_time, self.max_connection_wait_time)
+            else:
+                connection_wait_time = 1.0
 
         self.heartbeat()
         return result
@@ -701,6 +746,7 @@ class Worker(object):
         os.environ['RQ_WORKER_ID'] = self.name
         os.environ['RQ_JOB_ID'] = job.id
         if child_pid == 0:
+            os.setsid()
             self.main_work_horse(job, queue)
             os._exit(0) # just in case
         else:
@@ -723,13 +769,18 @@ class Worker(object):
             except HorseMonitorTimeoutException:
                 # Horse has not exited yet and is still running.
                 # Send a heartbeat to keep the worker alive.
-                self.heartbeat(self.job_monitoring_interval + 60)
 
                 # Kill the job from this side if something is really wrong (interpreter lock/etc).
                 if job.timeout != -1 and (utcnow() - job.started_at).total_seconds() > (job.timeout + 60):
+                    self.heartbeat(self.job_monitoring_interval + 60)
                     self.kill_horse()
                     self.wait_for_horse()
                     break
+
+                with self.connection.pipeline() as pipeline:
+                    self.heartbeat(self.job_monitoring_interval + 60, pipeline=pipeline)
+                    job.heartbeat(utcnow(), pipeline=pipeline)
+                    pipeline.execute()
 
             except OSError as e:
                 # In case we encountered an OSError due to EINTR (which is
@@ -743,6 +794,7 @@ class Worker(object):
                 # Send a heartbeat to keep the worker alive.
                 self.heartbeat()
 
+        self._horse_pid = 0  # Set horse PID to 0, horse has finished working
         if ret_val == os.EX_OK:  # The process exited normally.
             return
         job_status = job.get_status()
@@ -823,8 +875,7 @@ class Worker(object):
             registry = StartedJobRegistry(job.origin, self.connection,
                                           job_class=self.job_class)
             registry.add(job, timeout, pipeline=pipeline)
-            job.set_status(JobStatus.STARTED, pipeline=pipeline)
-            pipeline.hset(job.key, 'started_at', utcformat(utcnow()))
+            job.prepare_for_execution(self.name, pipeline=pipeline)
             pipeline.execute()
 
         msg = 'Processing {0} from {1} since {2}'
@@ -848,7 +899,7 @@ class Worker(object):
                     self.connection,
                     job_class=self.job_class
                 )
-
+            job.worker_name = None
             # Requeue/reschedule if retry is configured
             if job.retries_left and job.retries_left > 0:
                 retry = True
@@ -910,6 +961,7 @@ class Worker(object):
                     result_ttl = job.get_result_ttl(self.default_result_ttl)
                     if result_ttl != 0:
                         job.set_status(JobStatus.FINISHED, pipeline=pipeline)
+                        job.worker_name = None
                         # Don't clobber the user's meta dictionary!
                         job.save(pipeline=pipeline, include_meta=False)
 
@@ -922,7 +974,7 @@ class Worker(object):
 
                     pipeline.execute()
                     break
-                except WatchError:
+                except redis.exceptions.WatchError:
                     continue
 
     def perform_job(self, job, queue, heartbeat_ttl=None):
@@ -954,9 +1006,7 @@ class Worker(object):
             job._status = JobStatus.FAILED
             job.ended_at = utcnow()
             exc_info = sys.exc_info()
-            exc_string = self._get_safe_exception_string(
-                traceback.format_exception(*exc_info)
-            )
+            exc_string = ''.join(traceback.format_exception(*exc_info))
             self.handle_job_failure(job=job, exc_string=exc_string, queue=queue,
                                     started_job_registry=started_job_registry)
             self.handle_exception(job, *exc_info)
@@ -983,9 +1033,7 @@ class Worker(object):
 
     def handle_exception(self, job, *exc_info):
         """Walks the exception handler stack to delegate exception handling."""
-        exc_string = Worker._get_safe_exception_string(
-            traceback.format_exception(*exc_info)
-        )
+        exc_string = ''.join(traceback.format_exception(*exc_info))
         self.log.error(exc_string, exc_info=True, extra={
             'func': job.func_name,
             'arguments': job.args,
@@ -1005,16 +1053,6 @@ class Worker(object):
 
             if not fallthrough:
                 break
-
-    @staticmethod
-    def _get_safe_exception_string(exc_strings):
-        """Ensure list of exception strings is decoded on Python 2 and joined as one string safely."""
-        if sys.version_info[0] < 3:
-            try:
-                exc_strings = [exc.decode("utf-8") for exc in exc_strings]
-            except ValueError:
-                exc_strings = [exc.decode("latin-1") for exc in exc_strings]
-        return ''.join(exc_strings)
 
     def push_exc_handler(self, handler_func):
         """Pushes an exception handler onto the exc handler stack."""
@@ -1054,18 +1092,22 @@ class Worker(object):
             return True
         return False
 
+    def handle_payload(self, message):
+        """Handle external commands"""
+        self.log.debug('Received message: %s', message)
+        payload = parse_payload(message)
+        handle_command(self, payload)
+
 
 class SimpleWorker(Worker):
-    def main_work_horse(self, *args, **kwargs):
-        raise NotImplementedError("Test worker does not implement this method")
 
     def execute_job(self, job, queue):
         """Execute job in same thread/process, do not fork()"""
         # "-1" means that jobs never timeout. In this case, we should _not_ do -1 + 60 = 59. We should just stick to DEFAULT_WORKER_TTL.
         if job.timeout == -1:
-               timeout = DEFAULT_WORKER_TTL
+            timeout = DEFAULT_WORKER_TTL
         else:
-               timeout = (job.timeout or DEFAULT_WORKER_TTL) + 60
+            timeout = (job.timeout or DEFAULT_WORKER_TTL) + 60
         return self.perform_job(job, queue, heartbeat_ttl=timeout)
 
 
@@ -1079,10 +1121,6 @@ class HerokuWorker(Worker):
     imminent_shutdown_delay = 6
 
     frame_properties = ['f_code', 'f_lasti', 'f_lineno', 'f_locals', 'f_trace']
-    if PY2:
-        frame_properties.extend(
-            ['f_exc_traceback', 'f_exc_type', 'f_exc_value', 'f_restricted']
-        )
 
     def setup_work_horse_signals(self):
         """Modified to ignore SIGINT and SIGTERM and only handle SIGRTMIN"""
