@@ -42,27 +42,45 @@ from .compat import as_text, string_types, total_ordering
 from .connections import resolve_connection
 from .defaults import DEFAULT_RESULT_TTL
 from .exceptions import DequeueTimeout, NoSuchJobError, InvalidJobOperation
-from .job import Job, JobStatus, RunCondition
-from .serializers import resolve_serializer
+from .job import Job, JobStatus, Retry, RunCondition
+from .serializers import resolve_serializer, DefaultSerializer
 from .utils import backend_class, get_version, import_attribute, parse_timeout, utcnow
 
+
+import datetime
+from redis import Connection
+from redis.client import Pipeline, Redis
+
+from .compat import as_text as as_text, string_types as string_types, total_ordering as total_ordering
+
+from typing import Any, Optional, Iterable, Union, Type, Callable, Tuple, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .registry import FailedJobRegistry, StartedJobRegistry, FinishedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
 
 _logger = logging.getLogger(__name__)
 
 
-def compact(lst):
+def compact(lst: Any):
     return [item for item in lst if item is not None]
 
 
 @total_ordering
 class Queue(object):
-    job_class = Job
-    DEFAULT_TIMEOUT = 180  # Default timeout seconds.
-    redis_queue_namespace_prefix = "rq:queue:"
-    redis_queues_keys = "rq:queues"
+    connection: Redis
+    name: str
+    _key: str
+    _default_timeout: int
+    _is_async: bool
+    serializer: Any
+    redis_server_version: StrictVersion
+    job_class: Type[Job] = Job
+    DEFAULT_TIMEOUT: int = 180  # Default timeout seconds.
+    redis_queue_namespace_prefix: str = "rq:queue:"
+    redis_queues_keys: str = "rq:queues"
 
     @classmethod
-    def all(cls, connection=None, job_class=None, serializer=None):
+    def all(cls, connection: Optional[Redis] = None, job_class: Optional[Type[Job]] = None, serializer: Optional[Any] = None):
         """Returns an iterable of all Queues.
         """
         connection = resolve_connection(connection)
@@ -75,7 +93,7 @@ class Queue(object):
         return [to_queue(rq_key) for rq_key in connection.smembers(cls.redis_queues_keys) if rq_key]
 
     @classmethod
-    def from_queue_key(cls, queue_key, connection=None, job_class=None, serializer=None):
+    def from_queue_key(cls, queue_key: str, connection: Optional[Redis] = None, job_class: Optional[Type[Job]] = None, serializer: Optional[Any] = None):
         """Returns a Queue instance, based on the naming conventions for naming
         the internal Redis keys.  Can be used to reverse-lookup Queues by their
         Redis keys.
@@ -88,13 +106,13 @@ class Queue(object):
 
     def __init__(
         self,
-        name="default",
-        default_timeout=None,
-        connection=None,
-        is_async=True,
-        job_class=None,
-        serializer=None,
-        **kwargs
+        name: str = "default",
+        default_timeout: Optional[float] = None,
+        connection: Optional[Redis] = None,
+        is_async: bool = True,
+        job_class: Optional[Type[Job]] = None,
+        serializer: Optional[DefaultSerializer] = None,
+        **kwargs: Any
     ):
         self.connection = resolve_connection(connection)
         prefix = self.redis_queue_namespace_prefix
@@ -125,10 +143,10 @@ class Queue(object):
     def __bool__(self):
         return True
 
-    def __iter__(self):
+    def __iter__(self) -> Any:
         yield self
 
-    def get_redis_server_version(self):
+    def get_redis_server_version(self) -> StrictVersion:
         """Return Redis server version of connection"""
         if not self.redis_server_version:
             self.redis_server_version = get_version(self.connection)
@@ -176,7 +194,7 @@ class Queue(object):
         script = self.connection.register_script(script)
         return script(keys=[self.key])
 
-    def delete(self, delete_jobs=True):
+    def delete(self, delete_jobs: bool = True) -> None:
         """Deletes the queue. If delete_jobs is true it removes all the associated messages on the queue first."""
         if delete_jobs:
             self.empty()
@@ -195,7 +213,7 @@ class Queue(object):
         """Returns whether the current queue is async."""
         return bool(self._is_async)
 
-    def fetch_job(self, job_id):
+    def fetch_job(self, job_id: str):
         try:
             job = self.job_class.fetch(job_id, connection=self.connection, serializer=self.serializer)
         except NoSuchJobError:
@@ -204,7 +222,7 @@ class Queue(object):
             if job.origin == self.name:
                 return job
 
-    def get_job_position(self, job_or_id):
+    def get_job_position(self, job_or_id: Union[Job, str]):
         """Returns the position of a job within the queue
 
         Using Redis before 6.0.6 and redis-py before 3.5.4 has a complexity of
@@ -225,7 +243,7 @@ class Queue(object):
             return self.job_ids.index(job_id)
         return None
 
-    def get_job_ids(self, offset=0, length=-1):
+    def get_job_ids(self, offset: int = 0, length: int = -1):
         """Returns a slice of job IDs in the queue."""
         start = offset
         if length >= 0:
@@ -234,7 +252,7 @@ class Queue(object):
             end = length
         return [as_text(job_id) for job_id in self.connection.lrange(self.key, start, end)]
 
-    def get_jobs(self, offset=0, length=-1):
+    def get_jobs(self, offset: int = 0, length: int = -1):
         """Returns a slice of jobs in the queue."""
         job_ids = self.get_job_ids(offset, length)
         return compact([self.fetch_job(job_id) for job_id in job_ids])
@@ -250,46 +268,46 @@ class Queue(object):
         return self.get_jobs()
 
     @property
-    def count(self):
+    def count(self) -> int:
         """Returns a count of all messages in the queue."""
         return self.connection.llen(self.key)
 
     @property
-    def failed_job_registry(self):
+    def failed_job_registry(self) -> "FailedJobRegistry":
         """Returns this queue's FailedJobRegistry."""
         from rq.registry import FailedJobRegistry
 
         return FailedJobRegistry(queue=self, job_class=self.job_class)
 
     @property
-    def started_job_registry(self):
+    def started_job_registry(self) -> "StartedJobRegistry":
         """Returns this queue's StartedJobRegistry."""
         from rq.registry import StartedJobRegistry
 
         return StartedJobRegistry(queue=self, job_class=self.job_class)
 
     @property
-    def finished_job_registry(self):
+    def finished_job_registry(self) -> "FinishedJobRegistry":
         """Returns this queue's FinishedJobRegistry."""
         from rq.registry import FinishedJobRegistry
 
         return FinishedJobRegistry(queue=self)
 
     @property
-    def deferred_job_registry(self):
+    def deferred_job_registry(self) -> "DeferredJobRegistry":
         """Returns this queue's DeferredJobRegistry."""
         from rq.registry import DeferredJobRegistry
 
         return DeferredJobRegistry(queue=self, job_class=self.job_class)
 
     @property
-    def scheduled_job_registry(self):
+    def scheduled_job_registry(self) -> "ScheduledJobRegistry":
         """Returns this queue's ScheduledJobRegistry."""
         from rq.registry import ScheduledJobRegistry
 
         return ScheduledJobRegistry(queue=self, job_class=self.job_class)
 
-    def remove(self, job_or_id, pipeline=None):
+    def remove(self, job_or_id: Union[Job, str], pipeline: Optional[Pipeline] = None):
         """Removes Job from queue, accepts either a Job instance or ID."""
         job_id = job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id
 
@@ -299,7 +317,7 @@ class Queue(object):
 
         return self.connection.lrem(self.key, 1, job_id)
 
-    def compact(self):
+    def compact(self) -> None:
         """Removes all "dead" jobs from the queue by cycling through it, while
         guaranteeing FIFO semantics.
         """
@@ -313,7 +331,7 @@ class Queue(object):
             if self.job_class.exists(job_id, self.connection):
                 self.connection.rpush(self.key, job_id)
 
-    def push_job_id(self, job_id, pipeline=None, at_front=False):
+    def push_job_id(self, job_id: str, pipeline: Optional[Pipeline] = None, at_front: bool = False) -> None:
         """Pushes a job ID on the corresponding Redis queue.
         'at_front' allows you to push the job onto the front instead of the back of the queue"""
         connection = pipeline if pipeline is not None else self.connection
@@ -324,23 +342,23 @@ class Queue(object):
 
     def create_job(
         self,
-        func,
-        args=None,
-        kwargs=None,
-        timeout=None,
-        result_ttl=None,
-        ttl=None,
-        failure_ttl=None,
-        description=None,
-        depends_on=None,
-        job_id=None,
-        meta=None,
-        status=JobStatus.QUEUED,
-        retry=None,
-        on_success=None,
-        on_failure=None,
-        run_when=None,
-    ):
+        func: Any,
+        args: Optional[tuple] = None,
+        kwargs: Optional[dict] = None,
+        timeout: Optional[int] = None,
+        result_ttl: Optional[int] = None,
+        ttl: Optional[int] = None,
+        failure_ttl: Optional[int] = None,
+        description: Optional[str] = None,
+        depends_on: Union[None, str, Job, Iterable[Union[str, Job]]] = None,
+        job_id: Optional[str] = None,
+        meta: Optional[dict] = None,
+        status: Optional[Union[str, JobStatus]] = JobStatus.QUEUED,
+        retry: Optional[Retry] = None,
+        on_success: Optional[Callable[['Job', Any], Any]] = None,
+        on_failure: Optional[Callable[['Job', Any], Any]] = None,
+        run_when: Optional[Union[str, Iterable[str]]] = None
+    ) -> Job:
         """Creates a job based on parameters given."""
         timeout = parse_timeout(timeout)
 
@@ -385,23 +403,23 @@ class Queue(object):
 
     def enqueue_call(
         self,
-        func,
-        args=None,
-        kwargs=None,
-        timeout=None,
-        result_ttl=None,
-        ttl=None,
-        failure_ttl=None,
-        description=None,
-        depends_on=None,
-        job_id=None,
-        at_front=False,
-        meta=None,
-        retry=None,
-        on_success=None,
-        on_failure=None,
-        run_when=None,
-    ):
+        func: Any,
+        args: Optional[tuple] = None,
+        kwargs: Optional[dict] = None,
+        timeout: Optional[int] = None,
+        result_ttl: Optional[int] = None,
+        ttl: Optional[int] = None,
+        failure_ttl: Optional[int] = None,
+        description: Optional[str] = None,
+        depends_on: Union[None, str, Job, Iterable[Union[str, Job]]] = None,
+        job_id: Optional[str] = None,
+        at_front: bool = False,
+        meta: Optional[dict] = None,
+        retry: Optional[Retry] = None,
+        on_success: Optional[Callable[['Job', Any], Any]] = None,
+        on_failure: Optional[Callable[['Job', Any], Any]] = None,
+        run_when: Optional[Union[str, Iterable[str]]] = None
+    ) -> Job:
         """Creates a job to represent the delayed function call and enqueues
         it.
 nd
@@ -433,7 +451,7 @@ nd
             self.enqueue_job(job, at_front=at_front)
         return job
 
-    def defer_job(self, job, pipeline=None):
+    def defer_job(self, job: Job, pipeline: Optional[Pipeline] = None) -> bool:
         # If a _dependent_ job depends on any unfinished job, register all the
         # _dependent_ job's dependencies instead of enqueueing it.
         #
@@ -467,7 +485,7 @@ nd
                     raise
         return False
 
-    def run_job(self, job):
+    def run_job(self, job: Job) -> Job:
         """
         This method is only used when Queue is not in async mode.
         This means, the queue acts like a worker.
@@ -502,7 +520,7 @@ nd
         return job
 
     @classmethod
-    def parse_args(cls, f, *args, **kwargs):
+    def parse_args(cls, f: Any, *args: Any, **kwargs: Any) -> Tuple:
         """
         Parses arguments passed to `queue.enqueue()` and `queue.enqueue_at()`
 
@@ -556,7 +574,7 @@ nd
             run_when,
         )
 
-    def enqueue(self, f, *args, **kwargs):
+    def enqueue(self, f: Any, *args: Any, **kwargs: Any) -> Job:
         """Creates a job to represent the delayed function call and enqueues it."""
 
         (
@@ -597,7 +615,7 @@ nd
             run_when=run_when
         )
 
-    def enqueue_at(self, datetime, f, *args, **kwargs):
+    def enqueue_at(self, datetime: datetime.datetime, f: Any, *args: Any, **kwargs: Any) -> Job:
         """Schedules a job to be enqueued at specified time"""
 
         (
@@ -639,7 +657,7 @@ nd
 
         return self.schedule_job(job, datetime)
 
-    def schedule_job(self, job, datetime, pipeline=None):
+    def schedule_job(self, job: Job, datetime: datetime.datetime, pipeline: Optional[Pipeline] = None) -> Job:
         """Puts job on ScheduledJobRegistry"""
         from .registry import ScheduledJobRegistry
 
@@ -655,11 +673,11 @@ nd
             pipe.execute()
         return job
 
-    def enqueue_in(self, time_delta, func, *args, **kwargs):
+    def enqueue_in(self, time_delta: datetime.timedelta, func: Any, *args: Any, **kwargs: Any) -> Job:
         """Schedules a job to be executed in a given `timedelta` object"""
         return self.enqueue_at(datetime.now(timezone.utc) + time_delta, func, *args, **kwargs)
 
-    def enqueue_job(self, job, pipeline=None, at_front=False):
+    def enqueue_job(self, job: Job, pipeline: Optional[Pipeline] = None, at_front: bool = False) -> Job:
         """Enqueues a job for delayed execution.
 
         If Queue is instantiated with is_async=False, job is executed immediately.
@@ -686,7 +704,7 @@ nd
             job = self.run_job(job)
         return job
 
-    def enqueue_dependents(self, job, pipeline=None):
+    def enqueue_dependents(self, job: Job, pipeline: Optional[Pipeline] = None) -> None:
         """Enqueues all jobs in the given job's dependents set and clears it.
 
         When called without a pipeline, this method uses WATCH/MULTI/EXEC.
@@ -717,13 +735,14 @@ nd
                     ]
 
                     for dependent_job in jobs_to_process:
-                        dependent_job.save_dependency_status(job.id, job.get_status(refresh=False), pipeline=p)
+                        if dependent_job is not None:
+                            dependent_job.save_dependency_status(job.id, job.get_status(refresh=False), pipeline=p)
                     p.execute()
 
                 jobs_to_process = [
                     dependent_job
                     for dependent_job in jobs_to_process
-                    if dependent_job.dependencies_are_met(
+                    if dependent_job is not None and dependent_job.dependencies_are_met(
                         known_jobs_statuses={job.id: job.get_status(refresh=False)}, pipeline=pipe
                     )
                 ]
@@ -754,12 +773,12 @@ nd
                     # handle it
                     raise
 
-    def pop_job_id(self):
+    def pop_job_id(self) -> str:
         """Pops a given job ID from this Redis queue."""
         return as_text(self.connection.lpop(self.key))
 
     @classmethod
-    def lpop(cls, queue_keys, timeout, connection=None):
+    def lpop(cls, queue_keys: Any, timeout: Any, connection: Optional[Any] = None):
         """Helper method.  Intermediate method to abstract away from some
         Redis API details, where LPOP accepts only a single key, whereas BLPOP
         accepts multiple.  So if we want the non-blocking LPOP, we need to
@@ -789,7 +808,7 @@ nd
             return None
 
     @classmethod
-    def dequeue_any(cls, queues, timeout, connection=None, job_class=None, serializer=None):
+    def dequeue_any(cls, queues: List[Union[str, "Queue"]], timeout: Any, connection: Optional[Redis] = None, job_class: Optional[Type[Job]] = None, serializer: DefaultSerializer = None):
         """Class method returning the job_class instance at the front of the given
         set of Queues, where the order of the queues is important.
 
@@ -827,17 +846,17 @@ nd
 
     # Total ordering defition (the rest of the required Python methods are
     # auto-generated by the @total_ordering decorator)
-    def __eq__(self, other):  # noqa
+    def __eq__(self, other: Any) -> Any:  # noqa
         if not isinstance(other, Queue):
             raise TypeError("Cannot compare queues to other objects")
         return self.name == other.name
 
-    def __lt__(self, other):
+    def __lt__(self, other: Any) -> Any:
         if not isinstance(other, Queue):
             raise TypeError("Cannot compare queues to other objects")
         return self.name < other.name
 
-    def __hash__(self):  # pragma: no cover
+    def __hash__(self) -> Any:  # pragma: no cover
         return hash(self.name)
 
     def __repr__(self):  # noqa  # pragma: no cover

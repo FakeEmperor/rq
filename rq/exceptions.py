@@ -2,6 +2,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from typing import Any
 
 class NoSuchJobError(Exception):
     pass
@@ -24,7 +25,8 @@ class DequeueTimeout(Exception):
 
 
 class ShutDownImminentException(Exception):
-    def __init__(self, msg, extra_info):
+    extra_info: Any
+    def __init__(self, msg: Any, extra_info: Any) -> None:
         self.extra_info = extra_info
         super(ShutDownImminentException, self).__init__(msg)
 

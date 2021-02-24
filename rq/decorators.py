@@ -11,13 +11,29 @@ from .queue import Queue
 from .utils import backend_class
 
 
+from redis import Redis
+from .defaults import DEFAULT_RESULT_TTL as DEFAULT_RESULT_TTL
+from .job import Job
+from .queue import Queue as Queue
+from .utils import backend_class as backend_class
+from typing import Any, Optional, Type, Iterable, Union, Callable
 class job(object):  # noqa
-    queue_class = Queue
+    queue: str
+    connection: Redis
+    timeout: Optional[int]
+    result_ttl: Optional[int]
+    ttl: Optional[int]
+    meta: Optional[dict]
+    depends_on: Optional[Iterable[Union[str, Job]]]
+    at_front: Optional[bool]
+    description: Optional[str]
+    failure_ttl: Optional[int]
+    queue_class: Type[Queue] = Queue
 
-    def __init__(self, queue, connection=None, timeout=None,
-                 result_ttl=DEFAULT_RESULT_TTL, ttl=None,
-                 queue_class=None, depends_on=None, at_front=None, meta=None,
-                 description=None, failure_ttl=None, retry=None):
+    def __init__(self, queue: str, connection: Optional[Redis] = None, timeout: Optional[int] = None,
+                 result_ttl: int = DEFAULT_RESULT_TTL, ttl: Optional[int] = None,
+                 queue_class: Optional[Type[Queue]] = None, depends_on: Optional[Iterable[Union[str, Job]]] = None, at_front: Optional[bool] = None, meta: Optional[dict] = None,
+                 description: Optional[str] = None, failure_ttl: Optional[int] = None, retry: Optional[int] = None) -> None:
         """A decorator that adds a ``delay`` method to the decorated function,
         which in turn creates a RQ job when called. Accepts a required
         ``queue`` argument that can be either a ``Queue`` instance or a string
@@ -42,7 +58,7 @@ class job(object):  # noqa
         self.failure_ttl = failure_ttl
         self.retry = retry
 
-    def __call__(self, f):
+    def __call__(self, f: Callable) -> Job:
         @wraps(f)
         def delay(*args, **kwargs):
             if isinstance(self.queue, string_types):

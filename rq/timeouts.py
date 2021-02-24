@@ -5,6 +5,7 @@ from __future__ import (absolute_import, division, print_function,
 import signal
 
 
+from typing import Any, ContextManager
 class BaseTimeoutException(Exception):
     """Base exception for timeouts."""
     pass
@@ -26,15 +27,16 @@ class HorseMonitorTimeoutException(BaseTimeoutException):
 
 class BaseDeathPenalty(object):
     """Base class to setup job timeouts."""
-
-    def __init__(self, timeout, exception=JobTimeoutException, **kwargs):
+    _timeout: Any
+    _exception: Any
+    def __init__(self, timeout: Any, exception: Any = JobTimeoutException, **kwargs: Any) -> None:
         self._timeout = timeout
         self._exception = exception
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.setup_death_penalty()
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, type: Any, value: Any, traceback: Any):
         # Always cancel immediately, since we're done
         try:
             self.cancel_death_penalty()
@@ -50,27 +52,27 @@ class BaseDeathPenalty(object):
         # invoking context.
         return False
 
-    def setup_death_penalty(self):
+    def setup_death_penalty(self) -> None:
         raise NotImplementedError()
 
-    def cancel_death_penalty(self):
+    def cancel_death_penalty(self) -> None:
         raise NotImplementedError()
 
 
 class UnixSignalDeathPenalty(BaseDeathPenalty):
 
-    def handle_death_penalty(self, signum, frame):
+    def handle_death_penalty(self, signum: Any, frame: Any) -> None:
         raise self._exception('Task exceeded maximum timeout value '
                               '({0} seconds)'.format(self._timeout))
 
-    def setup_death_penalty(self):
+    def setup_death_penalty(self) -> None:
         """Sets up an alarm signal and a signal handler that raises
         an exception after the timeout amount (expressed in seconds).
         """
         signal.signal(signal.SIGALRM, self.handle_death_penalty)
         signal.alarm(self._timeout)
 
-    def cancel_death_penalty(self):
+    def cancel_death_penalty(self) -> None:
         """Removes the death penalty alarm and puts back the system into
         default signal handling.
         """

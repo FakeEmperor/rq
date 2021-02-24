@@ -15,17 +15,21 @@ import logging
 import numbers
 import sys
 
-from collections.abc import Iterable
 from distutils.version import StrictVersion
 
 from redis.exceptions import ResponseError
 
+from typing import TYPE_CHECKING, Any, Optional, Callable, Iterable, Union
 from .compat import as_text, is_python_version, string_types
 from .exceptions import TimeoutFormatError
+from redis import Redis
 
 
 class _Colorizer(object):
-    def __init__(self):
+    codes: Any
+    notty: Any
+
+    def __init__(self) -> None:
         esc = "\x1b["
 
         self.codes = {}
@@ -65,17 +69,17 @@ class _Colorizer(object):
     def reset_color(self):
         return self.codes["reset"]
 
-    def colorize(self, color_key, text):
+    def colorize(self, color_key: Any, text: Any):
         if self.notty:
             return text
         else:
             return self.codes[color_key] + text + self.codes["reset"]
 
 
-colorizer = _Colorizer()
+colorizer: _Colorizer = _Colorizer()
 
 
-def make_colorizer(color):
+def make_colorizer(color: str) -> Callable[[str], str]:
     """Creates a function that colorizes text with the given color.
 
     For example:
@@ -94,22 +98,23 @@ def make_colorizer(color):
 
 class ColorizingStreamHandler(logging.StreamHandler):
 
-    levels = {
+    exclude: Any
+    levels: Any = {
         logging.WARNING: make_colorizer('darkyellow'),
         logging.ERROR: make_colorizer('darkred'),
         logging.CRITICAL: make_colorizer('darkred'),
     }
 
-    def __init__(self, exclude=None, *args, **kwargs):
+    def __init__(self, exclude: Optional[Any] = None, *args: Any, **kwargs: Any) -> None:
         self.exclude = exclude
         super(ColorizingStreamHandler, self).__init__(*args, **kwargs)
 
     @property
-    def is_tty(self):
+    def is_tty(self) -> bool:
         isatty = getattr(self.stream, 'isatty', None)
         return isatty and isatty()
 
-    def format(self, record):
+    def format(self, record: Any):
         message = logging.StreamHandler.format(self, record)
         if self.is_tty:
             colorize = self.levels.get(record.levelno, lambda x: x)
@@ -123,7 +128,7 @@ class ColorizingStreamHandler(logging.StreamHandler):
         return message
 
 
-def import_attribute(name):
+def import_attribute(name: Any):
     """Return an attribute from a dotted path name (e.g. "path.to.func")."""
     module_name, attribute = name.rsplit('.', 1)
     module = importlib.import_module(module_name)
@@ -134,14 +139,14 @@ def utcnow():
     return datetime.datetime.utcnow()
 
 
-_TIMESTAMP_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
+_TIMESTAMP_FORMAT: str = '%Y-%m-%dT%H:%M:%S.%fZ'
 
 
-def utcformat(dt):
+def utcformat(dt: datetime.datetime):
     return dt.strftime(as_text(_TIMESTAMP_FORMAT))
 
 
-def utcparse(string):
+def utcparse(string: str):
     try:
         return datetime.datetime.strptime(string, _TIMESTAMP_FORMAT)
     except ValueError:
@@ -149,7 +154,7 @@ def utcparse(string):
         return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
 
 
-def first(iterable, default=None, key=None):
+def first(iterable: Iterable, default: Optional[Any] = None, key: Optional[Any] = None):
     """
     Return first element of `iterable` that evaluates true, else return None
     (or an optional default value).
@@ -188,12 +193,12 @@ def first(iterable, default=None, key=None):
     return default
 
 
-def is_nonstring_iterable(obj):
+def is_nonstring_iterable(obj: Any):
     """Returns whether the obj is an iterable, but not a string"""
     return isinstance(obj, Iterable) and not isinstance(obj, string_types)
 
 
-def ensure_list(obj):
+def ensure_list(obj: Any):
     """
     When passed an iterable of objects, does nothing, otherwise, it returns
     a list with just that object in it.
@@ -206,7 +211,7 @@ def current_timestamp():
     return calendar.timegm(datetime.datetime.utcnow().utctimetuple())
 
 
-def enum(name, *sequential, **named):
+def enum(name: str, *sequential: Any, **named: Any):
     enum_values = dict(zip(sequential, range(len(sequential))), **named)
     if "_values" in enum_values:
         raise ValueError("'_values' is a protected member in and cannot be set as an enum name")
@@ -219,7 +224,7 @@ def enum(name, *sequential, **named):
     return type(str(name), (), class_values)
 
 
-def backend_class(holder, default_name, override=None):
+def backend_class(holder: Any, default_name: Any, override: Optional[Any] = None):
     """Get a backend class using its default attribute name or an override"""
     if override is None:
         return getattr(holder, default_name)
@@ -229,14 +234,14 @@ def backend_class(holder, default_name, override=None):
         return override
 
 
-def str_to_date(date_str):
+def str_to_date(date_str: str):
     if not date_str:
         return
     else:
         return utcparse(as_text(date_str))
 
 
-def parse_timeout(timeout):
+def parse_timeout(timeout: Union[str, float, None]):
     """Transfer all kinds of timeout format to an integer representing seconds"""
     if not isinstance(timeout, numbers.Integral) and timeout is not None:
         try:
@@ -254,7 +259,7 @@ def parse_timeout(timeout):
     return timeout
 
 
-def get_version(connection):
+def get_version(connection: "Redis") -> StrictVersion:
     """
     Returns StrictVersion of Redis server version.
     This function also correctly handles 4 digit redis server versions.

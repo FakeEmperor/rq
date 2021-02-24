@@ -9,24 +9,25 @@ import random
 import time
 
 
-def do_nothing():
+from typing import Any
+def do_nothing() -> None:
     pass
 
 
-def sleep(secs):
+def sleep(secs: Any) -> None:
     time.sleep(secs)
 
 
-def endless_loop():
+def endless_loop() -> None:
     while True:
         time.sleep(1)
 
 
-def div_by_zero():
+def div_by_zero() -> None:
     1 / 0
 
 
-def fib(n):
+def fib(n: Any):
     if n <= 1:
         return 1
     else:

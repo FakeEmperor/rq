@@ -2,12 +2,22 @@ from .compat import as_text
 
 from rq.utils import split_list
 
-WORKERS_BY_QUEUE_KEY = 'rq:workers:%s'
-REDIS_WORKER_KEYS = 'rq:workers'
+
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from redis.client import Pipeline
+    from .connections import Connection
+    from .queue import Queue
+    from .worker import Worker
+    from .compat import as_text as as_text
+
+WORKERS_BY_QUEUE_KEY: str = 'rq:workers:%s'
+REDIS_WORKER_KEYS: str = 'rq:workers'
 MAX_KEYS = 1000
 
 
-def register(worker, pipeline=None):
+def register(worker: "Worker", pipeline: Optional["Pipeline"] = None) -> None:
     """Store worker key in Redis so we can easily discover active workers."""
     connection = pipeline if pipeline is not None else worker.connection
     connection.sadd(worker.redis_workers_keys, worker.key)
@@ -16,7 +26,7 @@ def register(worker, pipeline=None):
         connection.sadd(redis_key, worker.key)
 
 
-def unregister(worker, pipeline=None):
+def unregister(worker: "Worker", pipeline: Optional["Pipeline"] = None) -> None:
     """Remove worker key from Redis."""
     if pipeline is None:
         connection = worker.connection.pipeline()
@@ -32,7 +42,7 @@ def unregister(worker, pipeline=None):
         connection.execute()
 
 
-def get_keys(queue=None, connection=None):
+def get_keys(queue: Optional["Queue"] = None, connection: Optional["Connection"] = None):
     """Returnes a list of worker keys for a queue"""
     if queue is None and connection is None:
         raise ValueError('"queue" or "connection" argument is required')
@@ -47,7 +57,7 @@ def get_keys(queue=None, connection=None):
     return {as_text(key) for key in redis.smembers(redis_key)}
 
 
-def clean_worker_registry(queue):
+def clean_worker_registry(queue: "Queue") -> None:
     """Delete invalid worker keys in registry"""
     keys = list(get_keys(queue))
 

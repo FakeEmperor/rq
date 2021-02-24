@@ -10,8 +10,11 @@ from rq.defaults import (DEFAULT_LOGGING_FORMAT,
                          DEFAULT_LOGGING_DATE_FORMAT)
 
 
-def setup_loghandlers(level=None, date_format=DEFAULT_LOGGING_DATE_FORMAT,
-                      log_format=DEFAULT_LOGGING_FORMAT, name='rq.worker'):
+from typing import Optional
+
+
+def setup_loghandlers(level: Optional[int] = None, date_format: str = DEFAULT_LOGGING_DATE_FORMAT,
+                      log_format: str = DEFAULT_LOGGING_FORMAT, name: str = 'rq.worker') -> None:
     logger = logging.getLogger(name)
 
     if not _has_effective_handler(logger):
@@ -31,7 +34,7 @@ def setup_loghandlers(level=None, date_format=DEFAULT_LOGGING_DATE_FORMAT,
         logger.setLevel(level if isinstance(level, int) else level.upper())
 
 
-def _has_effective_handler(logger):
+def _has_effective_handler(logger: logging.Logger):
     """
     Checks if a logger has a handler that will catch its messages in its logger hierarchy.
     :param `logging.Logger` logger: The logger to be checked.

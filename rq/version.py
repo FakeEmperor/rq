@@ -2,4 +2,4 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-VERSION = '1.7.0'
+VERSION: str = '1.7.0'

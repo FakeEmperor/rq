@@ -9,6 +9,7 @@ from redis import Redis
 from .local import LocalStack, release_local
 
 
+from typing import Optional, ContextManager
 class NoRedisConnectionException(Exception):
     pass
 
@@ -27,7 +28,7 @@ def Connection(connection=None):  # noqa
             'Check your Redis connection setup.'
 
 
-def push_connection(redis):
+def push_connection(redis: Redis) -> None:
     """Pushes the given connection on the stack."""
     _connection_stack.push(redis)
 
@@ -37,7 +38,7 @@ def pop_connection():
     return _connection_stack.pop()
 
 
-def use_connection(redis=None):
+def use_connection(redis: Optional[Redis] = None) -> None:
     """Clears the stack and uses the given connection.  Protects against mixed
     use of use_connection() and stacked connection contexts.
     """
@@ -50,14 +51,14 @@ def use_connection(redis=None):
     push_connection(redis)
 
 
-def get_current_connection():
+def get_current_connection() -> Redis:
     """Returns the current Redis connection (i.e. the topmost on the
     connection stack).
     """
     return _connection_stack.top
 
 
-def resolve_connection(connection=None):
+def resolve_connection(connection=None) -> Redis:
     """Convenience function to resolve the given or the current connection.
     Raises an exception if it cannot resolve a connection now.
     """
