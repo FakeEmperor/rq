@@ -147,7 +147,7 @@ def get_current_job(connection: Optional[Redis] = None, job_class: Optional[Type
     return _job_stack.top
 
 
-def requeue_job(job_id, connection):
+def requeue_job(job_id: str, connection: Optional[Redis] = None) -> "Job":
     job = Job.fetch(job_id, connection=connection)
     job.requeue()
     return job
@@ -287,7 +287,16 @@ class Job(Generic[T]):
 
         # dependency could be job instance or id
         if depends_on is not None:
-            job._dependency_ids = [depends_on.id if isinstance(depends_on, Job) else depends_on]
+            if isinstance(depends_on, (*string_types, Job)):
+                job._dependency_ids = [depends_on.id if isinstance(depends_on, Job) else depends_on]
+            elif isinstance(depends_on, Iterable):
+                job._dependency_ids = [
+                    did.id if isinstance(did, Job) else did
+                    for did in depends_on
+                ]
+            else:
+                raise ValueError("Unknown type depends_on '%s'" % type(depends_on), depends_on)
+
         return job
 
     def get_position(self) -> Optional[int]:
@@ -818,8 +827,13 @@ class Job(Generic[T]):
         self.failure_ttl = int(obj.get("failure_ttl")) if obj.get("failure_ttl") else None  # noqa
         self._status = as_text(obj.get("status")) if obj.get("status") else None
 
+        self._dependency_ids = []
         dependency_id = obj.get("dependency_id", None)
-        self._dependency_ids = [as_text(dependency_id)] if dependency_id else []
+        if dependency_id is not None:
+            dependency_id = self.serializer.loads(dependency_id)
+            self._dependency_ids = [
+                as_text(did) for did in dependency_id
+            ]
 
         if obj.get("saved_dependency_statuses"):
             self._saved_dependency_statuses = self.serializer.loads(obj.get("saved_dependency_statuses"))
@@ -900,7 +914,7 @@ class Job(Generic[T]):
         if self._status is not None:
             obj["status"] = self._status
         if self._dependency_ids:
-            obj["dependency_id"] = self._dependency_ids[0]
+            obj["dependency_id"] = self.serializer.dumps(self._dependency_ids)
         if self._saved_dependency_statuses:
             obj["saved_dependency_statuses"] = self.serializer.dumps(self._saved_dependency_statuses)
         if self.meta and include_meta:
