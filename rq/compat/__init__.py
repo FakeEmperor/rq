@@ -59,7 +59,7 @@ def as_text(v):
     elif isinstance(v, str):
         return v
     else:
-        raise ValueError('Unknown type %r' % type(v))
+        raise ValueError('Unknown type %r' % type(v), v)
 
 
 def decode_redis_hash(h):
