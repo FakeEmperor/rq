@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 WORKERS_SUSPENDED: str = 'rq:suspended'
 
 
-def is_suspended(connection: Redis, worker: Optional[Worker] = None) -> bool:
+def is_suspended(connection: "Redis", worker: Optional["Worker"] = None) -> bool:
     with connection.pipeline() as pipeline:
         if worker is not None:
             worker.heartbeat(pipeline=pipeline)
@@ -18,7 +18,7 @@ def is_suspended(connection: Redis, worker: Optional[Worker] = None) -> bool:
         return pipeline.execute()[-1]
 
 
-def suspend(connection: Redis, ttl: Optional[float] = None) -> None:
+def suspend(connection: "Redis", ttl: Optional[float] = None) -> None:
     """ttl = time to live in seconds.  Default is no expiration
        Note:  If you pass in 0 it will invalidate right away
     """
@@ -27,5 +27,5 @@ def suspend(connection: Redis, ttl: Optional[float] = None) -> None:
         connection.expire(WORKERS_SUSPENDED, ttl)
 
 
-def resume(connection: Redis):
+def resume(connection: "Redis"):
     return connection.delete(WORKERS_SUSPENDED)
