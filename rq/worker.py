@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from distutils.version import StrictVersion
 from uuid import uuid4
 
-import datetime
 from logging import Logger
 from redis.client import Pipeline, Redis
 from .compat import PY2 as PY2, as_text as as_text, string_types as string_types, text_type as text_type
@@ -134,7 +133,7 @@ class Worker(object):
     successful_job_count: int
     failed_job_count: int
     total_working_time: float
-    birth_date: datetime.datetime
+    birth_date: datetime
     scheduler: RQScheduler
     disable_default_exception_handler: bool
     _exc_handlers: Any

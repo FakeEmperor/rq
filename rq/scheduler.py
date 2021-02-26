@@ -15,7 +15,6 @@ from .queue import Queue
 from .registry import ScheduledJobRegistry
 from .utils import current_timestamp, enum
 
-import datetime
 from multiprocessing.context import Process
 from .defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
 from .job import Job as Job
@@ -33,7 +32,7 @@ class RQScheduler(object):
     # WORKING: scheduler is in the midst of scheduling jobs
     # STOPPED: scheduler is in stopped condition
 
-    lock_acquisition_time: Optional[datetime.datetime]
+    lock_acquisition_time: Optional[datetime]
     interval: int
     _queue_names: Set[str]
     _acquired_locks: Set[str]
