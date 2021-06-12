@@ -60,11 +60,9 @@ shared_options = [
                  default=DEFAULT_CONNECTION_CLASS,
                  help='Redis client class to use'),
     click.option('--path', '-P',
-                 default=('.',),
-                 type=tuple,
+                 default='.',
                  help='Specify the import path.',
-                 multiple=True,
-                 required=False,)
+                 multiple=True)
 ]
 
 
@@ -150,7 +148,7 @@ def requeue(cli_config, queue, all, job_class, job_ids,  **options):
 @click.option('--only-queues', '-Q', is_flag=True, help='Show only queue info')
 @click.option('--only-workers', '-W', is_flag=True, help='Show only worker info')
 @click.option('--by-queue', '-R', is_flag=True, help='Shows workers by queue')
-@click.argument('queues', default=None, type=str, nargs=-1)
+@click.argument('queues', nargs=-1)
 @pass_cli_config
 def info(cli_config, interval, raw, only_queues, only_workers, by_queue, queues,
          **options):
