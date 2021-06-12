@@ -33,7 +33,7 @@ import traceback
 import uuid
 import warnings
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from distutils.version import StrictVersion
 from redis import WatchError
@@ -46,8 +46,6 @@ from .job import Job, JobStatus, Retry, RunCondition
 from .serializers import resolve_serializer, DefaultSerializer
 from .utils import backend_class, get_version, import_attribute, parse_timeout, utcnow
 
-
-import datetime
 from redis import Connection
 from redis.client import Pipeline, Redis
 
@@ -451,6 +449,25 @@ nd
             self.enqueue_job(job, at_front=at_front)
         return job
 
+    def _defer_job(self, job: Job, dependencies: List[Job], pipeline: Optional[Pipeline] = None) -> bool:
+        pipe = pipeline or self.connection.pipeline()
+        while True:
+            try:
+                for dependency in dependencies:
+                    if not JobStatus.terminal(dependency.get_status(refresh=False)):
+                        job.set_status(JobStatus.DEFERRED, pipeline=pipe)
+                        job.register_dependency(pipeline=pipe)
+                        job.save(pipeline=pipe)
+                        job.cleanup(ttl=job.ttl, pipeline=pipe)
+                        if pipeline is None:
+                            pipe.execute()
+                        return True
+                break
+            except WatchError:
+                if pipeline is not None:
+                    raise
+        return False
+
     def defer_job(self, job: Job, pipeline: Optional[Pipeline] = None) -> bool:
         # If a _dependent_ job depends on any unfinished job, register all the
         # _dependent_ job's dependencies instead of enqueueing it.
@@ -464,26 +481,11 @@ nd
             try:
 
                 pipe.watch(job.dependencies_key)
-
                 dependencies = job.fetch_dependencies(watch=True, pipeline=pipe)
-
-                pipe.multi()
-
-                for dependency in dependencies:
-                    if not JobStatus.terminal(dependency.get_status(refresh=False)):
-                        job.set_status(JobStatus.DEFERRED, pipeline=pipe)
-                        job.register_dependency(pipeline=pipe)
-                        job.save(pipeline=pipe)
-                        job.cleanup(ttl=job.ttl, pipeline=pipe)
-                        if pipeline is None:
-                            pipe.execute()
-                        return True
-
-                break
+                return self._defer_job(job, dependencies=dependencies, pipeline=pipe)
             except WatchError:
                 if pipeline is not None:
                     raise
-        return False
 
     def run_job(self, job: Job) -> Job:
         """
@@ -615,7 +617,7 @@ nd
             run_when=run_when
         )
 
-    def enqueue_at(self, datetime: datetime.datetime, f: Any, *args: Any, **kwargs: Any) -> Job:
+    def enqueue_at(self, datetime: datetime, f: Any, *args: Any, **kwargs: Any) -> Job:
         """Schedules a job to be enqueued at specified time"""
 
         (
@@ -657,7 +659,7 @@ nd
 
         return self.schedule_job(job, datetime)
 
-    def schedule_job(self, job: Job, datetime: datetime.datetime, pipeline: Optional[Pipeline] = None) -> Job:
+    def schedule_job(self, job: Job, datetime: datetime, pipeline: Optional[Pipeline] = None) -> Job:
         """Puts job on ScheduledJobRegistry"""
         from .registry import ScheduledJobRegistry
 
@@ -673,7 +675,7 @@ nd
             pipe.execute()
         return job
 
-    def enqueue_in(self, time_delta: datetime.timedelta, func: Any, *args: Any, **kwargs: Any) -> Job:
+    def enqueue_in(self, time_delta: timedelta, func: Any, *args: Any, **kwargs: Any) -> Job:
         """Schedules a job to be executed in a given `timedelta` object"""
         return self.enqueue_at(datetime.now(timezone.utc) + time_delta, func, *args, **kwargs)
 

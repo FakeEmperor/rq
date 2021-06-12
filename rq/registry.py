@@ -228,7 +228,7 @@ class FailedJobRegistry(StatusJobRegistry):
         score = timestamp if timestamp is not None else current_timestamp()
         self.connection.zremrangebyscore(self.key, 0, score)
 
-    def add(self, job: Job, ttl: Optional[int] = None, exc_string: str = '', pipeline: Optional[Pipeline] = None) -> None:
+    def add(self, job: Job, ttl: Optional[int] = None, exc_string: str = '', pipeline: Optional[Pipeline] = None, remove_from_queue: bool = True) -> None:
         """
         Adds a job to a registry with expiry time of now + ttl.
         `ttl` defaults to DEFAULT_FAILURE_TTL if not specified.
@@ -244,7 +244,7 @@ class FailedJobRegistry(StatusJobRegistry):
 
         job.exc_info = exc_string
         job.save(pipeline=p, include_meta=False)
-        job.cleanup(ttl=ttl, pipeline=p)
+        job.cleanup(ttl=ttl, pipeline=p, remove_from_queue=remove_from_queue)
         p.zadd(self.key, {job.id: score})
 
         if not pipeline:

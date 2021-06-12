@@ -4,24 +4,16 @@ import signal
 import time
 import traceback
 from datetime import datetime
-from multiprocessing import Process
 
 from redis import Redis, SSLConnection
 
+from multiprocessing.context import Process
 from .defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
 from .job import Job
 from .logutils import setup_loghandlers
 from .queue import Queue
 from .registry import ScheduledJobRegistry
 from .utils import current_timestamp, enum
-
-from multiprocessing.context import Process
-from .defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
-from .job import Job as Job
-from .logutils import setup_loghandlers as setup_loghandlers
-from .queue import Queue as Queue
-from .registry import ScheduledJobRegistry as ScheduledJobRegistry
-from .utils import current_timestamp as current_timestamp, enum as enum
 from typing import Any, Optional, List, Set, Union, Iterable
 SCHEDULER_KEY_TEMPLATE: str = 'rq:scheduler:%s'
 SCHEDULER_LOCKING_KEY_TEMPLATE: str = 'rq:scheduler-lock:%s'
