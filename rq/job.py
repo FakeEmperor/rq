@@ -559,7 +559,7 @@ class Job(Generic[T]):
         self.on_success = None
 
     def __repr__(self):  # noqa  # pragma: no cover
-        return "{0}({1!r}, enqueued_at={2!r})".format(self.__class__.__name__, self._id, self.enqueued_at)
+        return "{0}({1!r}, name={2!r}, enqueued_at={3!r})".format(self.__class__.__name__, self._id, self.display_func_name, self.enqueued_at)
 
     def __str__(self):
         return "<{0} {1}: {2}>".format(self.__class__.__name__, self.id, self.description)
@@ -971,7 +971,13 @@ class Job(Generic[T]):
         cancellation.
         """
         pipeline = pipeline or self.connection.pipeline()
-        if self.origin:
+        if not self.origin or self._status == JobStatus.CANCELLED:
+            return
+        status = self._status
+        # it is safe as we won't ever pick this job up to change its status
+        if status in (JobStatus.DEFERRED, JobStatus.SCHEDULED):
+            self.set_status(JobStatus.CANCELLED)
+        if not JobStatus.terminal(status):
             from .queue import Queue
             from .registry import CancelledJobRegistry
 
@@ -979,10 +985,7 @@ class Job(Generic[T]):
             queue.remove(self, pipeline=pipeline)
             # Being in CancelledJobRegistry only means the intent to be cancelled.
             registry = CancelledJobRegistry(name=self.origin, connection=self.connection, job_class=self.__class__)
-            registry.add(job=self, pipeline=pipeline, ttl=self.failure_ttl)
-            # it is safe as we won't ever pick this job up to change its status
-            if self.get_status(refresh=True) in (JobStatus.DEFERRED, JobStatus.SCHEDULED):
-                self.set_status(JobStatus.CANCELLED)
+            registry.add(job=self, pipeline=pipeline, ttl=self.failure_ttl, remove_from_queue=False)
         pipeline.execute()
 
     def check_scheduling_state(self, known_job_statuses: Dict[str, str] = None, pipeline: Pipeline = None) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -1048,6 +1051,7 @@ class Job(Generic[T]):
         on this job can optionally be deleted as well."""
         from .registry import StatusJobRegistryMeta
 
+        # Cancel job first before deleting it.
         if remove_from_queue:
             self.cancel(pipeline=pipeline)
         connection = pipeline if pipeline is not None else self.connection
