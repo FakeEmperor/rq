@@ -76,7 +76,7 @@ class TestUtils(RQTestCase):
 
     def test_get_redis_version(self):
         """Ensure get_version works properly"""
-        redis = Redis()
+        redis = self.testconn
         self.assertTrue(isinstance(get_version(redis), StrictVersion))
 
         # Parses 3 digit version numbers correctly
