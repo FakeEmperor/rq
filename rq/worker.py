@@ -571,8 +571,10 @@ class Worker(object):
             self.pubsub.close()
 
     def work(self, burst: bool = False, logging_level: str = "INFO", date_format: str = DEFAULT_LOGGING_DATE_FORMAT,
-             log_format: str = DEFAULT_LOGGING_FORMAT, max_jobs: Optional[int] = None, with_scheduler: bool = False):
-        """Starts the work loop.
+             log_format: str = DEFAULT_LOGGING_FORMAT, max_jobs: Optional[int] = None, with_scheduler: bool = False,
+             raise_on_unhandled_exception: bool = False):
+        """
+        Starts the work loop.
 
         Pops and performs all jobs on the current list of queues.  When all
         queues are empty, block and wait for new jobs to arrive on any of the
@@ -650,6 +652,8 @@ class Worker(object):
                         'Worker %s: found an unhandled exception, quitting...',
                         self.key, exc_info=True
                     )
+                    if raise_on_unhandled_exception:
+                        raise
                     break
         finally:
             if not self.is_horse:
@@ -928,6 +932,53 @@ class Worker(object):
         msg = 'Processing {0} from {1} since {2}'
         self.procline(msg.format(job.func_name, job.origin, time.time()))
 
+    def _handle_job_failure(self, job: Job, queue: Queue, *, pipeline: Pipeline,
+                            started_job_registry: Optional[StartedJobRegistry] = None,
+                            exc_string: str):
+        if started_job_registry is None:
+            started_job_registry = StartedJobRegistry(
+                job.origin,
+                self.connection,
+                job_class=self.job_class
+            )
+        job.worker_name = None
+
+        # Requeue/reschedule if retry is configured
+        retry_interval = 0
+        if job.retries_left and job.retries_left > 0:
+            retry = True
+            retry_interval: int = job.get_retry_interval()
+            job.retries_left = job.retries_left - 1
+        else:
+            retry = False
+
+        if not retry:
+            # calls pipeline.multi!
+            queue.enqueue_dependents(job, pipeline=pipeline)
+            job.set_status(JobStatus.FAILED, pipeline=pipeline)
+
+        started_job_registry.remove(job, pipeline=pipeline)
+        if not self.disable_default_exception_handler and not retry:
+            failed_job_registry = FailedJobRegistry(job.origin, job.connection,
+                                                    job_class=self.job_class)
+            failed_job_registry.add(job, ttl=job.failure_ttl,
+                                    exc_string=exc_string, pipeline=pipeline)
+
+        self.set_current_job_id(None, pipeline=pipeline)
+        self.increment_failed_job_count(pipeline)
+        if job.started_at and job.ended_at:
+            self.increment_total_working_time(
+                job.ended_at - job.started_at, pipeline
+            )
+
+        if retry:
+            if retry_interval:
+                scheduled_datetime = datetime.now(timezone.utc) + timedelta(seconds=retry_interval)
+                job.set_status(JobStatus.SCHEDULED)
+                queue.schedule_job(job, scheduled_datetime, pipeline=pipeline)
+            else:
+                queue.enqueue_job(job, pipeline=pipeline)
+
     def handle_job_failure(self, job: Job, queue: Queue, started_job_registry: Optional[StartedJobRegistry] = None,
                            exc_string: str = '') -> None:
         """Handles the failure or an executing job by:
@@ -939,54 +990,19 @@ class Worker(object):
             6. Enqueue dependencies if no retries are set
         """
         self.log.debug('Handling failed execution of job %s', job.id)
-        with self.connection.pipeline() as pipeline:
-            if started_job_registry is None:
-                started_job_registry = StartedJobRegistry(
-                    job.origin,
-                    self.connection,
-                    job_class=self.job_class
-                )
-            job.worker_name = None
-            # Requeue/reschedule if retry is configured
-            if job.retries_left and job.retries_left > 0:
-                retry = True
-                retry_interval = job.get_retry_interval()
-                job.retries_left = job.retries_left - 1
-            else:
-                retry = False
-
-            if not retry:
-                # calls pipeline.multi!
-                queue.enqueue_dependents(job, pipeline=pipeline)
-                job.set_status(JobStatus.FAILED, pipeline=pipeline)
-
-            started_job_registry.remove(job, pipeline=pipeline)
-            if not self.disable_default_exception_handler and not retry:
-                failed_job_registry = FailedJobRegistry(job.origin, job.connection,
-                                                        job_class=self.job_class)
-                failed_job_registry.add(job, ttl=job.failure_ttl,
-                                        exc_string=exc_string, pipeline=pipeline)
-
-            self.set_current_job_id(None, pipeline=pipeline)
-            self.increment_failed_job_count(pipeline)
-            if job.started_at and job.ended_at:
-                self.increment_total_working_time(
-                    job.ended_at - job.started_at, pipeline
-                )
-
-            if retry:
-                if retry_interval:
-                    scheduled_datetime = datetime.now(timezone.utc) + timedelta(seconds=retry_interval)
-                    job.set_status(JobStatus.SCHEDULED)
-                    queue.schedule_job(job, scheduled_datetime, pipeline=pipeline)
-                else:
-                    queue.enqueue_job(job, pipeline=pipeline)
+        while True:
             try:
-                pipeline.execute()
+                with self.connection.pipeline() as pipeline:
+                    self._handle_job_failure(job, queue, pipeline=pipeline, started_job_registry=started_job_registry, exc_string=exc_string)
+                    pipeline.execute()
+                    break
+            except redis.WatchError:
+                pass
             except Exception:
                 # Ensure that custom exception handlers are called
                 # even if Redis is down
-                pass
+                logger.error(f"Failed to handle job {job} exception ", exc_info=True)
+                break
 
     def handle_job_success(self, job: Job, queue: Queue, started_job_registry: StartedJobRegistry) -> None:
         self.log.debug('Handling successful execution of job %s', job.id)
