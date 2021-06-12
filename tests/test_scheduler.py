@@ -72,8 +72,6 @@ class TestScheduledJobRegistry(RQTestCase):
         job.save()
         registry = ScheduledJobRegistry(queue=queue)
 
-        from datetime import timezone
-
         # If we pass in a datetime with no timezone, `schedule()`
         # assumes local timezone so depending on your local timezone,
         # the timestamp maybe different

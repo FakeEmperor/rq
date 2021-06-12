@@ -483,7 +483,7 @@ class TestJob(RQTestCase):
         w = Worker([q])
         w.work(burst=True)
         # access_self calls get_current_job() and executes successfully
-        self.assertEqual(job.get_status(), JobStatus.FINISHED)
+        self.assertEqual(JobStatus.FINISHED, job.get_status())
 
     def test_job_access_within_synchronous_job_function(self):
         queue = Queue(is_async=False)
@@ -776,6 +776,23 @@ class TestJob(RQTestCase):
         self.assertEqual(1, len(queue.get_jobs()))
         cancel_job(job.id)
         self.assertEqual(0, len(queue.get_jobs()))
+
+    def test_cancel_job_when_failed(self):
+        """
+        Check to see if cancelling a job when it already failed causes any issues
+        """
+        queue = Queue(connection=self.testconn)
+
+        dependency_job = queue.enqueue(fixtures.raise_exc, result_ttl=0)
+        dependent_job = queue.enqueue(fixtures.say_hello, depends_on=dependency_job)
+
+        w = Worker([queue])
+        w.work(burst=True, max_jobs=2, raise_on_unhandled_exception=True)
+        dependency_job.refresh()
+        dependent_job.refresh()
+        self.assertEqual(JobStatus.FAILED, dependency_job.get_status(refresh=True))
+        self.assertFalse(dependent_job.dependencies_are_met())
+        self.assertEqual(JobStatus.DEFERRED, dependent_job.get_status())
 
     def test_dependents_key_for_should_return_prefixed_job_id(self):
         """test redis key to store job dependents hash under"""
