@@ -649,7 +649,12 @@ class Job(Generic[T]):
 
     @classmethod
     def _get_linked_jobs(
-        cls, job: "Job", link_key_getter: Callable[["Job"], str], recursive: bool, pipeline: Pipeline, raise_on_no_such_job: bool = True
+        cls, job: "Job",
+        link_key_getter: Callable[["Job"], str],
+        recursive: bool,
+        pipeline: Pipeline,
+        raise_on_no_such_job: bool = True,
+        meta_key: str = None
     ) -> List[str]:
         """
         Get linked jobs from a given job using link key.
@@ -667,7 +672,9 @@ class Job(Generic[T]):
             try:
                 if pipeline is None:
                     pipe.watch(link_key)
-                direct_linked_job_ids = [as_text(job_id) for job_id in pipe.smembers(link_key)]
+                direct_linked_job_ids = {as_text(job_id) for job_id in pipe.smembers(link_key)}
+                if meta_key is not None and meta_key in job.meta:
+                    direct_linked_job_ids.update({*job.meta[meta_key]})
                 result.extend(direct_linked_job_ids)
                 if recursive:
                     for direct_linked_job_id in direct_linked_job_ids:
@@ -680,7 +687,7 @@ class Job(Generic[T]):
                             else:
                                 raise e
                         distant_link_ids = direct_linked_job._get_linked_jobs(  # noqa
-                            direct_linked_job, link_key_getter=link_key_getter, recursive=recursive, pipeline=pipeline,
+                            direct_linked_job, link_key_getter=link_key_getter, recursive=recursive, pipeline=pipeline, meta_key=meta_key
                         )
                         result.extend(distant_link_ids)
                 return result
@@ -692,6 +699,9 @@ class Job(Generic[T]):
                     # exception as it it the responsibility of the caller to
                     # handle it
                     raise
+
+    def _add_meta_dependents(self, dependent_ids: Iterable[str]):
+        self.meta["dependents"] = self.meta.get("dependents", []) + list(dependent_ids)
 
     def get_parent_ids(self, recursive: bool = False, pipeline: Pipeline = None, raise_on_no_such_job: bool = True) -> List[str]:
         """
@@ -721,16 +731,14 @@ class Job(Generic[T]):
         :param pipeline:  Command pipeline.
         :return:          A list of all parent jobs at the moment.
         """
-        return [
-            self.fetch(job_id, connection=self.connection)
-            for job_id in self._get_linked_jobs(
-                self,
-                link_key_getter=lambda j: j.dependencies_key,
-                recursive=recursive,
-                pipeline=pipeline,
-                raise_on_no_such_job=raise_on_no_such_job,
-            )
-        ]
+        results = []
+        for job_id in self.get_parent_ids(recursive=recursive, pipeline=pipeline, raise_on_no_such_job=raise_on_no_such_job):
+            try:
+                results.append(self.fetch(job_id, connection=self.connection))
+            except NoSuchJobError as e:
+                if raise_on_no_such_job:
+                    raise e from e
+        return results
 
     def get_children(self, recursive: bool = False, pipeline: Pipeline = None, raise_on_no_such_job: bool = True) -> List["Job"]:
         """
@@ -740,16 +748,14 @@ class Job(Generic[T]):
         :param pipeline:  Command pipeline.
         :return:          A list of all child jobs at the moment.
         """
-        return [
-            self.fetch(job_id, connection=self.connection)
-            for job_id in self._get_linked_jobs(
-                self,
-                link_key_getter=lambda j: j.dependents_key,
-                recursive=recursive,
-                pipeline=pipeline,
-                raise_on_no_such_job=raise_on_no_such_job,
-            )
-        ]
+        results = []
+        for job_id in self.get_child_ids(recursive=recursive, pipeline=pipeline, raise_on_no_such_job=raise_on_no_such_job):
+            try:
+                results.append(self.fetch(job_id, connection=self.connection))
+            except NoSuchJobError as e:
+                if raise_on_no_such_job:
+                    raise e from e
+        return results
 
     def get_child_ids(self, recursive=False, pipeline=None, raise_on_no_such_job=True):
         """
@@ -762,6 +768,7 @@ class Job(Generic[T]):
         return self._get_linked_jobs(
             self,
             link_key_getter=lambda j: j.dependents_key,
+            meta_key="dependents",
             recursive=recursive,
             pipeline=pipeline,
             raise_on_no_such_job=raise_on_no_such_job,
@@ -957,10 +964,13 @@ class Job(Generic[T]):
 
         return self.redis_server_version
 
-    def save_meta(self) -> None:
+    def save_meta(self, pipeline: Optional[Pipeline] = None) -> None:
         """Stores job meta from the job instance to the corresponding Redis key."""
+        pipe = pipeline or self.connection.pipeline()
         meta = self.serializer.dumps(self.meta)
-        self.connection.hset(self.key, "meta", meta)
+        pipe.hset(self.key, "meta", meta)
+        if pipeline is None:
+            pipe.execute()
 
     def cancel(self, pipeline: Optional[Pipeline] = None) -> None:
         """Cancels the given job, which will prevent the job from ever being

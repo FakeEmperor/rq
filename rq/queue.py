@@ -760,6 +760,8 @@ nd
                         queue = self.__class__(name=dependent.origin, connection=self.connection)
                         queue.enqueue_job(dependent, pipeline=pipe)
 
+                job._add_meta_dependents(dependent_job_ids)
+                job.save_meta(pipeline=pipe)
                 pipe.delete(dependents_key)
 
                 if pipeline is None:
